@@ -108,4 +108,106 @@ defmodule RocksdbTest do
       :ok = Rocksdb.close(reopened_db)
     end
   end
+
+  describe "Iteration & Get All Records" do
+    setup %{db: db} do
+      records = [
+        {"k1", "val1"},
+        {"k2", %{name: "user2", score: 42}},
+        {"k3", [1, 2, 3]}
+      ]
+
+      for {k, v} <- records do
+        :ok = Rocksdb.put(db, k, v)
+      end
+
+      %{records: records}
+    end
+
+    test "get_all returns all key-value records in sorted key order", %{db: db, records: records} do
+      assert {:ok, result} = Rocksdb.get_all(db)
+      assert result == records
+    end
+
+    test "all returns all records directly for use with for loop", %{db: db} do
+      items =
+        for {k, v} <- Rocksdb.all(db) do
+          {k, v}
+        end
+
+      assert length(items) == 3
+      assert {"k1", "val1"} in items
+      assert {"k3", [1, 2, 3]} in items
+    end
+
+    test "each iterates through all records", %{db: db} do
+      # 2-arity function
+      ref = :atomics.new(1, [])
+      Rocksdb.each(db, fn _k, _v -> :atomics.add(ref, 1, 1) end)
+      seen_count = :atomics.get(ref, 1)
+      assert seen_count == 3
+
+      # 1-arity function
+      ref2 = :atomics.new(1, [])
+      Rocksdb.each(db, fn {_k, _v} -> :atomics.add(ref2, 1, 1) end)
+      assert :atomics.get(ref2, 1) == 3
+    end
+
+    test "stream lazily iterates with for comprehension and Stream/Enum", %{db: db, records: records} do
+      # for loop over stream
+      streamed =
+        for {k, v} <- Rocksdb.stream(db) do
+          {k, v}
+        end
+
+      assert streamed == records
+
+      # Enum pipeline over stream
+      keys =
+        db
+        |> Rocksdb.stream()
+        |> Stream.map(fn {k, _v} -> k end)
+        |> Enum.to_list()
+
+      assert keys == ["k1", "k2", "k3"]
+    end
+
+    test "raw options with get_all and stream", %{db: db} do
+      :ok = Rocksdb.put(db, "raw_k", <<1, 2, 3>>, raw: true)
+
+      {:ok, all_raw} = Rocksdb.get_all(db, raw: true)
+      assert is_list(all_raw)
+      assert Enum.all?(all_raw, fn {k, v} -> is_binary(k) and is_binary(v) end)
+
+      stream_raw = Rocksdb.stream(db, raw: true) |> Enum.to_list()
+      assert stream_raw == all_raw
+    end
+
+    test "low-level iterator navigation", %{db: db} do
+      {:ok, iter} = Rocksdb.iterator(db)
+
+      # seek to first
+      assert :ok = Rocksdb.iter_seek_to_first(iter)
+      assert true = Rocksdb.iter_valid?(iter)
+      assert {:ok, {"k1", "val1"}} = Rocksdb.iter_current(iter)
+
+      # next
+      assert :ok = Rocksdb.iter_next(iter)
+      assert {:ok, {"k2", %{name: "user2", score: 42}}} = Rocksdb.iter_current(iter)
+
+      # seek to specific key
+      assert :ok = Rocksdb.iter_seek(iter, "k3")
+      assert {:ok, {"k3", [1, 2, 3]}} = Rocksdb.iter_current(iter)
+
+      # seek to last and prev
+      assert :ok = Rocksdb.iter_seek_to_last(iter)
+      assert {:ok, {"k3", [1, 2, 3]}} = Rocksdb.iter_current(iter)
+
+      assert :ok = Rocksdb.iter_prev(iter)
+      assert {:ok, {"k2", %{name: "user2", score: 42}}} = Rocksdb.iter_current(iter)
+
+      # close iterator
+      assert :ok = Rocksdb.iter_close(iter)
+    end
+  end
 end
